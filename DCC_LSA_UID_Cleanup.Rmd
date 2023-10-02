@@ -1,0 +1,259 @@
+---
+title: "DCC_LSA_UID_Cleanup"
+author: "Caroline Larsen"
+date: "2022-08-26"
+output:
+  word_document: default
+  html_document:
+    theme: yeti
+    highlight: kate
+    df_print: paged
+    code_folding: hide
+  pdf_document: default
+editor_options: 
+  markdown: 
+    wrap: 72
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, include = TRUE)
+```
+
+### Workspace set-up
+
+1.  Clean current work space
+2.  Suppress scientific notation
+3.  Load required packages
+
+```{r echo=FALSE}
+
+# Clean current work space
+rm(list=ls())
+
+# Suppress scientific notation
+options(scipen = 9999)
+
+# Load required package
+library(tidyverse)
+library(lubridate)
+library(dbplyr)
+library(tcltk)
+library(rlang)
+library(knitr)
+library(stringr)
+library(tinytex)
+
+```
+
+### User selects input file
+
+1.  User selects input file of most recent DCC licenses with LSA UIDs
+    that need cleaning. The code should work on any CSV file so long as
+    the original LSA UID column name is "LSA ID Number".
+2.  Upload input file of opportunity ID names from SharePoint located in
+    SPECIFYLOCATIONHERE
+
+```{r}
+# Choose file path for recent DCC license information
+dcc.csv = tk_choose.files(caption = "Please select recent DCC LICENSE DATA CSV FILE")
+
+# Choose file path for opportunity ID information
+opp.id.csv = tk_choose.files(caption = "Please select OPPORTUNITY ID CSV FILE")
+
+
+# Read in the files
+dcc.in <- read_csv(dcc.csv, col_types = cols(.default = "c"), na = c("", "NA", "NULL"))
+head(as.data.frame(dcc.in))
+dcc <- dcc.in
+
+opp.id.in <- read_csv(opp.id.csv, col_types = cols(.default = "c"), na = c("", "NA", "NULL"))
+head(as.data.frame(opp.id.in))
+opp.id <- opp.id.in
+opp.lst <- opp.id$ID
+
+
+```
+
+### 1a. Definite acceptable formats and check proportions correct/incorrect
+
+List of acceptable LSA UID formats 1. e.g. EPIMS-ABC-12345-R2 2. e.g.
+EPIMS-ABC-12345-R1C 3. e.g. EPIMS-12345-R2 4. e.g. EPIMS-12345-R1C 5.
+e.g. 12345 6. e.g. ABC-12345 7. e.g. 1600-2000-0000-R2 8. e.g.
+1600-2000-0000-R1C
+
+```{r}
+
+accpt.id <- c("^EPIMS-[:alpha:]{3}-[:digit:]{5}-R\\d+$", 
+              "^EPIMS-[:alpha:]{3}-[:digit:]{5}-R\\d+[:alpha:]+$",
+              "^EPIMS-[:digit:]{5}-R\\d+$",
+              "^EPIMS-[:digit:]{5}-R\\d+[:alpha:]+$",
+              "^[:digit:]{5}$",
+              "^[:alpha:]{3}-[:digit:]{5}$",
+              "^1600-2[:digit:]{3}-[:digit:]{4}-0000-R\\d+$",
+              "^1600-2[:digit:]{3}-[:digit:]{4}-0000-R\\d+[:alpha:]+$")
+
+```
+
+### 1b. Function to count "correct" vs "incorrect" LSA UIDs and print "incorrect"
+
+```{r}
+
+incorrect_lsa = function(dat, columnname) {
+  
+  accpt.id <- c("^EPIMS-[:alpha:]{3}-[:digit:]{5}-R\\d{1}$",
+                "^EPIMS-[:alpha:]{3}-[:digit:]{5}-R\\d{1}[:alpha:]{1}$$",
+                "^EPIMS-[:digit:]{5}-R\\d{1}$",                             
+                "^EPIMS-[:digit:]{5}-R\\d{1}[:alpha:]{1}$",
+                "^[:digit:]{5}$",
+                "^[:alpha:]{3}-[:digit:]{5}$",
+                "^1600-2[:digit:]{3}-[:digit:]{4}-0000-R\\d{1}$",
+                "^1600-2[:digit:]{3}-[:digit:]{4}-0000-R\\d{1}[:alpha:]{1}$")
+  
+  dat.filt <- dat %>%
+    filter(str_detect(columnname, paste(accpt.id, collapse = "|")))
+  
+  dat.filtrev <- dat %>%
+    filter(!str_detect(columnname, paste(accpt.id, collapse = "|")))
+  
+  print(paste("total: ", nrow(dat)))
+  print(paste("correct: ", length(dat.filt$`LSA ID Number`)))
+  print(paste("incorrect: ",length(dat.filtrev$`LSA ID Number`)))
+  
+  if (nrow(dat.filtrev) <= 500) {print(dat.filtrev$`LSA ID Number`)}
+  
+}
+
+# Check correction status
+incorrect_lsa(dcc, dcc$`LSA ID Number`)
+
+```
+
+### 1c. Create a new column for cleaned UIDs, initially populated with submitted LSA UID numbers
+
+```{r}
+
+dcc$LSA.corrected <- dcc$`LSA ID Number`
+
+```
+
+### 2. Note LSA UIDs that contain Opportunity UIDs
+
+Identifies LSA UIDs that match opportunity IDs and marks them as "NA -
+Opportunity ID used" in the new LSA.corrected column
+
+```{r}
+
+dcc$LSA.corrected <- lapply(dcc$LSA.corrected, function (x) replace(x, grep(paste(".*", paste(opp.lst, collapse = "|"), ".*"), x), "NA - Opportunity ID used"))
+
+#Brief in-R report
+LSA.Opp.Used <- as.data.frame(subset(dcc, LSA.corrected == "NA - Opportunity ID used"))
+LSA.Opp.Used <- cbind(LSA.Opp.Used$`LSA ID Number`, unlist(LSA.Opp.Used$LSA.corrected))
+LSA.Opp.report <- list()
+LSA.Opp.report[[1]] <- "LSA UIDs using Opportunity ID Codes"
+LSA.Opp.report[[2]] <- LSA.Opp.Used
+print(LSA.Opp.report)
+
+```
+
+### 3. General clean up
+
+This list can be added to easily if common incorrect patterns emerge.
+The code runs the following corrections: 1. changes empty space to - 2.
+changes \_ . , ; / to - 3. changes -- to - 4. removes - hanging at end
+of UIDs 5. removes "(Rev2)" tags at the end of UIDs 6. removes anything
+after RX/RXX pattern 7. corrects misspellings of EPIMS 8. adds dash
+between "EPIMS" and 5 digit code if missing 9. adds dash between 5 digit
+code and region code if missing 10. deletes year from EPIMS IDs 11.
+deletes duplicated region code 12. fixes specific typo case where dash
+splits 5 digit code into 4 digit code and an extra digit before region
+code 13. adds 0000 into 1600 UIDs where missing 14. adds 0000 into 1600
+UIDs where missing 15. deletes "EPIMS" from 1600 IDs 16. adds "EPIMS" to
+front of IFS with county code + 5 digit code + regional code 17. adds
+dashes to EPIMS format UIDs without any (e.g. EPIMS12345R1) 18. drops
+"EPIMS" from UIDs formatted e.g. EPIMS-12345 19. deletes three letter
+county code from 1600 format UIDs
+
+```{r}
+
+# Correction code
+dcc <- dcc %>%  
+  mutate(LSA.corrected = str_replace_all(LSA.corrected, " ", "-")) %>%                #1
+  mutate(LSA.corrected = str_replace_all(LSA.corrected, ("[_.,;/]"), "-")) %>%        #2
+  mutate(LSA.corrected = str_replace_all(LSA.corrected, "--", "-")) %>%               #3
+  mutate(LSA.corrected = str_replace_all(LSA.corrected, "(-$)", "")) %>%              #4
+  mutate(LSA.corrected = str_replace_all(LSA.corrected, "\\([^)]*\\)", "")) %>%       #5 
+  mutate(LSA.corrected = str_replace_all(LSA.corrected, "(.R[:alnum:]{1,2})(-[:alnum:]*$)", "\\1")) %>%     #6 
+  mutate(LSA.corrected = str_replace_all(LSA.corrected, "EPMIS|EPMS-|EMPIS|Epims|epims|EPIM-|^PIMS", "EPIMS")) %>%  #7
+  mutate(LSA.corrected = str_replace_all(LSA.corrected, "(EPIMS)([:digit:]{5})", "\\1-\\2")) %>%            #8
+  mutate(LSA.corrected = str_replace_all(LSA.corrected, "([:digit:]{5})(R)", "\\1-\\2")) %>%                #9
+  mutate(LSA.corrected = str_replace_all(LSA.corrected, "(EPIMS)(-20\\d{2})(-\\d{5})", "\\1\\3")) %>%       #10
+  mutate(LSA.corrected = str_replace_all(LSA.corrected, "(EPIMS-\\d{5})(R[:alnum:]{1,2})(R[:alnum:]{1,2})", "\\1\\2")) %>%              #11
+  mutate(LSA.corrected = str_replace_all(LSA.corrected, "(EPIMS-\\d{4})(-)([:digit:]{1})(R[:alnum:]{1,2})", "\\1\\3\\2\\4")) %>%        #12
+  mutate(LSA.corrected = str_replace_all(LSA.corrected, "(1600-2[:digit:]{3}-[:digit:]{4})(-R\\d{1}$)", "\\1-0000\\2")) %>%             #13
+  mutate(LSA.corrected = str_replace_all(LSA.corrected, "(1600-2[:digit:]{3}-[:digit:]{4})(-R\\d{1}[:alpha:]{1}$)", "\\1-0000\\2")) %>% #14
+  mutate(LSA.corrected = str_replace_all(LSA.corrected, "^(1600-)(EPIMS-)", "\\1")) %>%                     #15
+  mutate(LSA.corrected = str_replace_all(LSA.corrected, "(^[:alpha:]{3}-[:digit:]{5}-R)", "EPIMS-\\1")) %>% #16
+  mutate(LSA.corrected = str_replace_all(LSA.corrected, "^(EPIMS)([:digit:]{5})(R[:digit:]{1})$", "\\1-\\2-\\3")) %>% #17
+  mutate(LSA.corrected = str_replace_all(LSA.corrected, "^(EPIMS-)([:digit:]{5})$", "\\2")) %>% #18
+  mutate(LSA.corrected = str_replace_all(LSA.corrected, "^(1600-2[:digit:]{3}-[:digit:]{4})(-[:alpha:]{3})(-R\\d{1}$)", "\\1\\3")) #19
+
+# Check correction status
+incorrect_lsa(dcc, dcc$LSA.corrected)
+
+```
+
+### 4. Final clean + extract 5 digit code
+
+Does a final match test for each \$LSA.corrected entry again acceptable
+UID list - If matches, keeps it as is - If doesn't match, but contains 5
+digit ID, uses 5 digit ID - Otherwise, uses NA
+
+```{r}
+
+# Run match test code
+dcc$LSA.corrected <- ifelse(str_detect(dcc$LSA.corrected, paste(accpt.id, collapse = "|")), dcc$LSA.corrected, 
+                                 ifelse( (!str_detect(dcc$LSA.corrected, paste(accpt.id, collapse = "|"))) 
+                                         & str_detect(dcc$LSA.corrected,"[:digit:]{5}"), 
+                                         str_extract(dcc$LSA.corrected, "[:digit:]{5}"), 
+                                         "NA"))
+
+# Check correction status
+incorrect_lsa(dcc, dcc$LSA.corrected)
+
+```
+
+### 5. Extract 5 digit code into new column with str_extract
+
+Provides a step to add a tab after code to prevent leading zeros from
+being dropped once output CSV file is read into Excel
+
+```{r}
+
+# Extract 5 digit code where possible
+dcc$LSA.5digit <- str_extract(dcc$LSA.corrected, "[:digit:]{5}")
+head(dcc$LSA.5digit)
+
+# Adds a tab after the 5 digit code 
+dcc$LSA.5digit <- paste0(dcc$LSA.5digit, "\t")
+
+dcc <- dcc[,c(1:19,36:37,20:35)]
+
+# An alternate option: adds an apostrophe before 5 digit code - uncomment to use
+#dcc$LSA.5digit <- paste0("'",dcc$LSA.5digit)
+
+```
+
+### 6. Write file to CSV
+
+```{r}
+
+# Write CSV file
+write.csv(dcc, str_c("DCC_LSA_UIDs_Cleanup_", as.character(today()), ".csv"))
+
+```
+
+### 
+
+```{r}
+
+```
