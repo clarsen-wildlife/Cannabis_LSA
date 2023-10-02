@@ -1,0 +1,563 @@
+---
+title: "Cannabis Monthly Permitting Report"
+output:
+  word_document:
+    reference_docx: report_template.docx
+  html_document:
+    df_print: paged
+  pdf_document: default
+params:
+  prog_date:
+    label: Beginning of program
+    input: date
+    value: "2018-01-01"
+  year_date:
+    label: Beginning of year date
+    input: date
+    value: "2021-01-01"
+  start_date:
+    label: Begining of month date
+    input: date
+    value: "2021-11-01"
+  end_date:
+    label: End of month date
+    input: date
+    value: "2021-11-30"
+---
+
+```{r global_options, include = FALSE}
+
+knitr::opts_chunk$set(echo = TRUE, fig.show = 'asis')
+
+```
+
+
+```{r, include = FALSE}
+
+# Clear workspace -- commented out for knitting
+#rm(list = ls())
+
+# Load required packages and scripts --------------------------- 
+
+library(tidyverse)
+library(lubridate)
+library(rlang)
+library(knitr)
+library(gdtools)
+library(flextable)
+library(officer)
+library(tcltk)
+library(plotly)
+source("../LSA_Functions.R")
+
+```
+
+
+```{r, include = FALSE}
+
+# Set date parameters --------------------------- 
+
+prog.date = params$prog_date
+year.date = params$year_date
+start.date = params$start_date
+end.date = params$end_date
+
+#defines a date stamp format to convert numerical format dates
+ds <- stamp("January 1, 2022")
+
+
+# Create date labels --------------------------- 
+
+mo.label = str_c(as.character(month(end.date, label = TRUE, abbr = FALSE)),
+                 as.character(year(end.date)), sep = " ")
+
+ytd.label = str_c(as.character(year(end.date)), "Year-to-Date", sep = " ")
+
+```
+
+
+```{r, include = FALSE}
+
+# User choose files --------------------------- 
+
+# Another option is rstudioapi::selectFile but doesn't currently support multiple file selection
+
+eom_csv = tk_choose.files(caption = "Select end of the month csv file", multi = FALSE, filters = matrix(c("Comma Delimited Files (.csv)", "*.csv"), 1, 2))
+
+```
+
+
+```{r, include = FALSE}
+
+# Read in input csvs --------------------------- 
+
+eom.in = read_csv(eom_csv, col_names = TRUE, col_types = cols(.default = "c"))
+
+```
+
+
+```{r, include = FALSE}
+
+# drop unnecessary columns
+# remove duplicate rows
+# convert dates
+# drop rows with status of agreement suspended or revoked
+eom.df = eom.in %>%
+  select(`ID Number`, Region, Opportunity, `Date Submitted`, Status, `Date of Status`, `Date Issued`, County) %>%
+  distinct(`ID Number`, .keep_all = TRUE) %>%
+  mutate(across(.cols = contains("Date"), ~as_date(., format = "%m/%d/%Y"))) %>%
+  filter(!Status %in% c('Agreement Revoked', 'Agreement Suspended'))
+
+```
+
+
+```{r, include = FALSE}
+
+# Add opportunity abbrev --------------------------- 
+
+eom.df = eom.df %>%
+  mutate(Opp = case_when(
+    Opportunity == "Cannabis Cultivation LSA Notification" ~ "LSA-Notify",
+    Opportunity == "Apply for Self-Certification (Cannabis Only)" ~ "Self-Cert",
+    Opportunity == "Notify for General Agreement (Cannabis Only)" ~ "GA",
+    Opportunity == "Standard Agreement" ~ "SA",
+    str_detect(Opportunity, "Standard Agreement") ~ "SA",
+    str_detect(Opportunity, "Paper Notification") ~ "SA"
+  ))
+
+```
+
+
+```{r, include = FALSE}
+
+# Create sub-category groupings --------------------------- 
+
+df = define_category(eom.df)
+
+# Change notifications under review date to end of month report date
+# Some permits have status date that are months old, so need date to reflect currently under review
+# note: use if_else to preserve date class
+df = df %>%
+  mutate(Date = if_else(Metric == "Notifications in Progress", ymd(end.date), Date),
+         Year = if_else(Metric != "Notifications in Progress", Year, as.factor(year(end.date))))
+
+```
+
+
+```{r, include = FALSE, echo = FALSE, results = "asis"}
+
+# Get counts ---------------------------
+
+# Filter to month
+mo = df %>% 
+  filter(Date >= start.date & Date <= end.date) %>%  
+  mutate(DateRange = mo.label)
+
+# Filter to year
+ytd.filter = str_c(as.character(year(end.date)), "-01-01")
+ytd = df %>% 
+  filter(Date >= ytd.filter) %>%
+  mutate(DateRange = ytd.label)
+
+# Program to date
+ptd = df %>% 
+  mutate(DateRange = "Program-to-Date")
+
+# Combine all date categories
+df.g = bind_rows(mo, ytd, ptd)
+
+# Counts by region
+n.reg = df.g %>%
+  group_by(Metric, Category, Region, DateRange) %>%
+  summarise(n = n(), .groups = "keep") %>% 
+  ungroup() %>% 
+  complete(Region, DateRange, nesting(Metric, Category), fill = list(n = 0)) %>%
+  filter(!((DateRange == ytd.label | DateRange == "Program-to-Date") & Metric %in% c("Notifications in Progress", "Draft Agreement Issued"))) %>% 
+  mutate(Group = "Region")
+
+# Counts by county
+n.co = df.g %>%
+  group_by(Metric, Category, County, DateRange) %>%
+  summarise(n = n(), .groups = "keep") %>% 
+  ungroup() %>% 
+  complete(County, DateRange, nesting(Metric, Category), fill = list(n = 0)) %>%
+  filter(!((DateRange == ytd.label | DateRange == "Program-to-Date") & Metric %in% c("Notifications in Progress", "Draft Agreement Issued"))) %>% 
+  mutate(Group = "County")
+
+# Counts for entire program (i.e., not grouped by county or region)
+n.all = df.g %>%
+  group_by(Metric, Category, DateRange) %>%
+  summarise(n = n(), .groups = "keep") %>% 
+  ungroup() %>% 
+  complete(DateRange, nesting(Metric, Category), fill = list(n = 0)) %>%
+  filter(!((DateRange == ytd.label | DateRange == "Program-to-Date") & Metric %in% c("Notifications in Progress", "Draft Agreement Issued"))) %>% 
+  mutate(Group = "Program-Wide")
+
+# Counts by region for month (include in progress sub-metrics)
+n.reg.mo = mo %>%
+  group_by(Metric, SubMetric, Category, Region, DateRange) %>%
+  summarise(n = n(), .groups = "keep") %>% 
+  ungroup() %>% 
+  complete(Region, DateRange, nesting(Metric, SubMetric, Category), fill = list(n = 0)) %>%
+  filter(!((DateRange == ytd.label | DateRange == "Program-to-Date") & Metric %in% c("Notifications in Progress", "Draft Agreement Issued"))) %>% 
+  mutate(Group = "Region")
+
+
+```
+
+
+```{r, include = FALSE, results = "asis"}
+
+# Combine count data and save to csv ---------------------------
+
+out.csv = str_c("CannabisMonthlyReport", "_", as.character(month(end.date, label = TRUE, abbr = TRUE)), as.character(year(end.date)), ".csv", sep = "")
+
+bind_rows(n.reg, n.co, n.all) %>%
+  select(Category, Metric, DateRange, Group, Region, County, n) %>%
+  rename(Count = n) %>%
+  write_csv(out.csv, col_names = TRUE)
+
+```
+
+
+```{r, include = FALSE}
+
+# Create plots ---------------------------
+
+# Plot data
+
+plot.data = n.reg %>% 
+  group_by(Region, DateRange, Metric) %>% 
+  summarise(n = sum(n, na.rm = TRUE), .groups = "keep") %>%
+  group_by(DateRange, Metric) %>%
+  mutate(prop = n / sum(n)) %>% 
+  arrange(desc(Region)) %>%
+  #mutate(lab.ypos = cumsum(prop) - (0.5 * prop)) %>%
+  ungroup()
+
+plot.data.mo = plot.data %>% 
+  filter(DateRange == mo.label, Metric %in% c('Notifications Received', 'Notifications in Progress', 'Final Document Issued'))
+plot.data.ytd = plot.data %>% filter(DateRange == ytd.label) %>% 
+  filter(DateRange == ytd.label, Metric %in% c('Notifications Received', 'Final Document Issued'))
+plot.data.to.date = plot.data %>% filter(DateRange == "Program-to-Date") %>% 
+  filter(DateRange == 'Program-to-Date', Metric %in% c('Notifications Received', 'Final Document Issued'))
+
+
+# Plot function
+
+# reg.colors = c("#D53E4F", "#F46D43", "#FDAE61", "#ABDDA4", "#66C2A5", "#3288BD")
+# https://github.com/wilkox/ggfittext
+# https://ggrepel.slowkow.com/articles/examples.html
+# https://stackoverflow.com/questions/36561030/how-expand-ggplot-bar-scale-on-one-side-but-not-the-other-without-manual-limits
+
+make_region_barplot = function(in.df, suffix){
+  
+  in.df = in.df %>% 
+    mutate(Metric = fct_relabel(Metric, ~ paste(.x, suffix, sep = ' ')),
+           Metric = fct_drop(Metric))
+  
+  p = ggplot(data = in.df, aes(x = Region, y = n, fill = Region)) +
+    geom_col() +
+    #scale_fill_brewer(palette = 'Set2') +
+    scale_fill_viridis_d(alpha = 0.8) +
+    #geom_text(aes(label = scales::percent(pct)) +
+    geom_text(aes(label = paste0(round(prop * 100), '%')),
+              colour = 'grey30', hjust = -0.15, fontface = 'italic', size = 3) +
+    scale_y_continuous(expand = expansion(mult = c(0, 0.1))) +
+    labs(y = 'Count', x = NULL) +
+    coord_flip() +
+    facet_wrap(vars(Metric), ncol = 1) +
+    theme_minimal() +
+    theme(legend.position = "none",
+          axis.title.y = element_blank(),
+          axis.title.x = element_text(color = 'grey30'),
+          axis.text = element_text(color = 'grey30'),
+          panel.grid.major.y = element_blank(),
+          strip.background = element_blank(),
+          strip.text.x = element_text(hjust = 0, face = 'plain', color = 'grey30', size = rel(1.5)))
+  
+  return(p)
+  
+}
+
+# Generate plots
+
+plot.mo = make_region_barplot(plot.data.mo, '')
+plot.ytd = make_region_barplot(plot.data.ytd, 'YTD')
+plot.to.date = make_region_barplot(plot.data.to.date, 'PTD')
+
+```
+
+
+# `r mo.label`
+
+## `r ds(ymd(start.date))` to `r ds(ymd(end.date))`
+
+
+```{r, include = FALSE, echo = FALSE, results = "asis"}
+
+# This month by region ---------------------------
+
+mo.reg = n.reg.mo %>%
+  filter(DateRange == mo.label) %>%
+  pivot_wider(names_from = Region, values_from = n) %>%
+  select(Metric, SubMetric, Category, R1, R2, R3, R4, R5, R6) %>%
+  # rows sums to new column
+  mutate(Total = rowSums(across(R1:R6))) %>% 
+  # column sum to new rows
+  group_by(Metric, SubMetric) %>% 
+  bind_rows(summarise(.,
+                      across(where(is.numeric), sum),
+                      across(where(is.factor), ~"Total"),
+                      .groups = "keep")) %>%
+  ungroup() 
+
+# add notifications in progress totals
+prog.total = mo.reg %>%
+  filter(Metric == "Notifications in Progress", Category == "Total") %>%
+  group_by(Metric) %>%
+  summarise(across(R1:R6, sum), .groups = "keep") %>%
+  ungroup() %>%
+  mutate(Total = rowSums(across(R1:R6)),
+         Category = "Total") 
+
+submet.ord <- c("Incomplete", "Under Review", "Complete", "")
+
+cat.ord <- c("SA", "Self-Cert", "GA", "SA Issued", "Self-Cert Letter", "GA Issued", "OpLaw", "Notification Not Required", "No Agreement Needed", "", "Total")
+
+mo.reg = mo.reg %>%
+  bind_rows(prog.total) %>%
+  mutate(Category = factor(Category, levels=cat.ord),
+         SubMetric = fct_explicit_na(SubMetric, ""),
+         SubMetric = fct_relevel(SubMetric, "", after = Inf)) %>%
+  arrange(Metric, SubMetric, Category)
+
+
+# fixes the border issue by changing cells to two spaces to differentiate
+mo.reg$SubMetric <- as.character(mo.reg$SubMetric)
+mo.reg$SubMetric[mo.reg$Metric ==  "Draft Agreement Issued"] <- "  "
+mo.reg$SubMetric <- as.factor(mo.reg$SubMetric)
+
+mo.reg = subset(mo.reg,!(Metric == "Draft Agreement Issued" & Category == "  "))
+
+```
+
+
+```{r, include = TRUE, echo = FALSE, results = "asis"}
+
+# Table for this month by region ---------------------------
+
+
+mo.reg %>%
+  flextable() %>%
+  merge_v(j = "Metric") %>%
+  merge_v(j = ~SubMetric) %>%
+  valign(j = "Metric", valign = "top") %>%
+  valign(j = "SubMetric", valign = "top") %>%
+  font(fontname = "Source Sans Pro Light", part = "all") %>%
+  fontsize(size = 11, part = "all") %>%
+  #bold and italicize row totals
+  bold(j = 3:ncol(mo.reg), i = which(mo.reg$Category == "Total")) %>% 
+  italic(j = 3:ncol(mo.reg), i = which(mo.reg$Category == "Total")) %>%
+  #bold last column (total)
+  bold(j = "Total", part = "all") %>%
+  italic(j = "Total", part = "all")%>%
+  bold(j = "Metric", part = "all") %>%
+  autofit() %>%
+  width(., width = dim_pretty(.)$widths) %>%
+  #alternating row color, but makes columns 1 and 2 all grey
+  theme_zebra() %>% 
+  bg(j = 1:2, part = "body", bg = "#EFEFEF") %>% 
+  border_outer(border = fp_border(width=2)) %>% 
+  border_inner_h() %>%
+  border_inner_v() %>%
+  hline(i = which(mo.reg$Category == "Total"), border = fp_border(width=2)) %>%
+  hline_bottom(part = "header", border = fp_border(width=2)) %>%
+  fix_border_issues()
+
+
+```
+
+
+
+```{r, include = TRUE, echo = FALSE, fig.width = 7.5, fig.height = 6.5, fig.keep = 'high', dpi = 500, eval = TRUE}
+
+plot(plot.mo)
+
+```
+Figure 1: Monthly metrics shown as regional percentages of statewide totals.
+\pagebreak
+
+# `r ytd.label`
+
+## `r ds(ymd(year.date))`  to `r ds(ymd(end.date))`
+ 
+
+```{r, include = FALSE}
+
+# YTD by region ---------------------------
+
+
+ytd.reg = n.reg %>%
+  filter(DateRange == ytd.label) %>%
+  pivot_wider(names_from = Region, values_from = n) %>%
+  select(Metric, Category, R1, R2, R3, R4, R5, R6) %>%
+  mutate(Total = rowSums(across(R1:R6))) %>% 
+  group_by(Metric) %>% 
+  bind_rows(summarise(.,
+                      across(where(is.numeric), sum),
+                      across(where(is.factor), ~"Total"),
+                      .groups = "keep")) %>%
+  ungroup() %>%
+  mutate(Category = factor(Category, levels=cat.ord)) %>%
+  arrange(Metric, Category)
+
+```
+
+
+```{r, include = TRUE, echo = FALSE, results = "asis"}
+
+# Table for ytd by region ---------------------------
+
+ytd.reg %>% 
+  flextable() %>%
+  merge_v(j = "Metric") %>%
+  valign(j = "Metric", valign = "top") %>%
+  font(fontname = "Source Sans Pro Light", part = "all") %>%
+  fontsize(size = 11, part = "all") %>%
+  #bold and italicize row totals
+  bold(j = 2:ncol(ytd.reg), i = which(ytd.reg$Category == "Total")) %>% 
+  italic(j = 2:ncol(ytd.reg), i = which(ytd.reg$Category == "Total",)) %>% 
+  bold(j = "Total", part = "all") %>%
+  italic(j = "Total", part = "all")%>%
+  bold(j = "Metric", part = "all") %>%
+  autofit() %>%
+  width(., width = dim_pretty(.)$widths) %>%
+  theme_zebra() %>% 
+  #bg(j = 1, part = "body", bg = "#EFEFEF") %>% 
+  border_outer(border = fp_border(width=2)) %>% 
+  border_inner_h() %>%
+  border_inner_v() %>%
+  hline(i = which(ytd.reg$Category == "Total"), border = fp_border(width=2)) %>%
+  hline_bottom(part = "header", border = officer::fp_border(width=2)) %>%
+  fix_border_issues()
+
+```
+
+```{r, include = TRUE, echo = FALSE, fig.width = 7.5, fig.keep = 'high', dpi = 500, eval = TRUE}
+
+plot(plot.ytd)
+
+```
+Figure 2: Year-to-Date metrics shown as regional percentages of statewide totals.
+\pagebreak
+
+# Program-to-Date
+
+## `r ds(ymd(prog.date))`  to `r ds(ymd(end.date))`
+
+
+```{r, include = FALSE}
+
+# Program count by region--------------------------- 
+
+ptd.reg = n.reg %>%
+  filter(DateRange == "Program-to-Date") %>%
+  pivot_wider(names_from = Region, values_from = n) %>%
+  select(Metric, Category, R1, R2, R3, R4, R5, R6) %>%
+  mutate(Total = rowSums(across(R1:R6))) %>% 
+  group_by(Metric) %>% 
+  bind_rows(summarise(.,
+                      across(where(is.numeric), sum),
+                      across(where(is.factor), ~"Total"),
+                      .groups = "keep")) %>%
+  ungroup() %>%
+  mutate(Category = factor(Category, levels=cat.ord)) %>%
+  arrange(Metric, Category)
+
+```
+
+
+```{r, include = TRUE, echo = FALSE, results = "asis"}
+
+# Table for program to date ---------------------------
+
+ptd.reg %>% 
+  flextable() %>%
+  merge_v(j = "Metric") %>%
+  valign(j = "Metric", valign = "top") %>%
+  font(fontname = "Source Sans Pro Light", part = "all") %>%
+  fontsize(size = 11, part = "all") %>%
+  bold(j = 2:ncol(ptd.reg), i = which(ptd.reg$Category == "Total")) %>% 
+  italic(j = 2:ncol(ptd.reg), i = which(ptd.reg$Category == "Total",)) %>% 
+  bold(j = "Total", part = "all") %>%
+  italic(j = "Total", part = "all")%>%
+  bold(j = "Metric", part = "all") %>%
+  autofit() %>%
+  width(., width = dim_pretty(.)$widths) %>%
+  theme_zebra() %>% 
+  #bg(j = 1, part = "body", bg = "#EFEFEF") %>% 
+  border_outer(border = fp_border(width=2)) %>% 
+  border_inner_h() %>%
+  border_inner_v() %>%
+  hline(i = which(ptd.reg$Category == "Total"), border = fp_border(width=2)) %>%
+  hline_bottom(part = "header", border = fp_border(width=2)) %>%
+  fix_border_issues()
+
+```
+
+
+```{r, include = TRUE, echo = FALSE, fig.width = 7.5, fig.keep = 'high', dpi = 500, eval = TRUE}
+
+plot(plot.to.date)
+
+```
+Figure 3: Program-to-Date metrics shown as regional percentages of statewide totals.
+
+
+```{r, include = TRUE, echo = FALSE, fig.keep = 'high', eval = FALSE}
+
+#https://stackoverflow.com/questions/37285729/how-to-give-subtitles-for-subplot-in-plot-ly-using-r
+# https://stackoverflow.com/questions/64108716/bold-plotly-r-pie-chart-labels
+#https://plotly-r.com/exporting-static-images.html
+#https://stackoverflow.com/questions/52258420/unexpected-behaviour-in-ggplot2-pie-chart-labeling
+#https://stackoverflow.com/questions/47752037/pie-chart-with-ggplot2-with-specific-order-and-percentage-annotations/47752576
+#https://ggrepel.slowkow.com/articles/examples.html
+
+fig = plot_ly()
+fig = fig %>%
+  add_pie(data = plot.data.ytd %>% filter(Metric == "Notifications Received"), 
+          labels = ~Region, values = ~n,
+          hole = 0.6,
+          texttemplate="%{label}<br>%{percent:1%}",
+          textfont = list(color = '#000000'),
+          #textposition = "outside",
+          insidetextorientation = "horizontal",
+          sort = FALSE,
+          title = 'Notifications Received', 
+          marker = list(colors = reg.colors,
+                       line = list(color = '#FFFFFF', width = 2)),
+          domain = list(row = 0, column = 0))
+fig = fig %>%
+   add_pie(data = plot.data.ytd %>% filter(Metric == "Final Document Issued"), 
+          labels = ~Region, values = ~n,
+          hole = 0.6,
+          title = 'Final Document Issued',
+          texttemplate="%{label}<br>%{percent:1%}",
+          insidetextorientation = "horizontal",
+          sort = FALSE,
+          marker = list(colors = reg.colors,
+                       line = list(color = '#FFFFFF', width = 2)),
+          domain = list(row = 0, column = 1))
+fig = fig %>%
+  layout(showlegend = FALSE,
+         grid = list(rows = 1, columns = 3),
+         xaxis = list(showgrid = FALSE, zeroline = FALSE, showticklabels = FALSE),
+         yaxis = list(showgrid = FALSE, zeroline = FALSE, showticklabels = FALSE),
+         width = 900, height = 500,
+         template = 'plotly_dark')
+
+fig
+
+```
+
